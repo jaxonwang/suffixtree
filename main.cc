@@ -1,6 +1,7 @@
 #include <iostream>
 #include <memory>
 #include <unordered_map>
+using namespace std;
 
 class SuffixTree;
 class Node;
@@ -138,6 +139,7 @@ public:
         root(std::make_shared<InternalNode>()) {}
   internal_node_ptr break_edge(internal_node_ptr &edge_owner, const CharT c,
                                const size_type pos) {
+    // break edge[start, end] into [start, pos] [post+1, end]
     auto real_node = edge_owner;
     auto &e = real_node->adj_edges[c];
     auto edge_pair = e->break_edge(pos);
@@ -145,8 +147,9 @@ public:
     auto second_edge = move(edge_pair.second);
     auto new_internal = std::make_shared<InternalNode>();
 
-    new_internal->children[c] = real_node->children[c];
-    new_internal->adj_edges[c] = move(second_edge);
+    const CharT breakpoint_c = text[pos + 1];
+    new_internal->children[breakpoint_c] = real_node->children[c];
+    new_internal->adj_edges[breakpoint_c] = move(second_edge);
 
     real_node->children[c] = std::static_pointer_cast<Node>(
         std::shared_ptr<InternalNode>{new_internal});
@@ -183,11 +186,57 @@ public:
     }
   }
 
+  bool static _same_tree(const internal_node_ptr &root1,
+                         const internal_node_ptr &root2) {
+    if (root1->adj_edges.size() != root2->adj_edges.size()) {
+      std::cout << "size different" << std::endl;
+      return false;
+    }
+    for (auto &c : root1->adj_edges) {
+      if (root2->adj_edges.count(c.first) == 0) {
+        std::cout << c.first << " not in the second" << std::endl;
+        return false;
+      }
+      auto &edge1 = c.second;
+      auto &edge2 = root2->adj_edges[c.first];
+      if (edge1->start_position() != edge2->start_position()) {
+        std::cout << "Different start position" << std::endl;
+        return false;
+      }
+      if (edge1->end_position() != edge2->end_position()) {
+        std::cout << "Different end position" << std::endl;
+        return false;
+      }
+    }
+    for (auto &c : root1->children) {
+      if (root2->children.count(c.first) == 0) {
+        std::cout << "children size different" << std::endl;
+        return false;
+      }
+      auto child1 = std::dynamic_pointer_cast<InternalNode>(c.second);
+      auto child2 =
+          std::dynamic_pointer_cast<InternalNode>(root2->children[c.first]);
+      // if child is leaf then the cooresponding child should be leaf
+      if ((!child1 && child2) || (child1 && !child2)){
+        std::cout << "different child type" << std::endl;
+        return false;
+      }
+      if(!child1)
+          continue;
+      if (!_same_tree(child1, child2))
+        return false;
+    }
+    return true;
+  }
+
+  bool operator==(const SuffixTreeBase &other) const {
+    return _same_tree(root, other.root);
+  }
+
   void print() const { _print(root); }
 };
 
 class SuffixTreeNaive : public SuffixTreeBase {
-  size_t textlen;
 
 public:
   SuffixTreeNaive(const StringT &s) : SuffixTreeBase(s) {}
@@ -238,33 +287,32 @@ private:
 public:
   SuffixTreeImpl(const StringT &s) : SuffixTreeBase(s), leaf_end_pos(0) {}
 
-  // try travel down to the point S[j, i)(could be empty) is matchd, and append S(i), create
-  // node if necessary
+  // try travel down to the point S[j, i)(could be empty) is matchd, and append
+  // S(i), create node if necessary
   ExtensionType travel_down_and_extend(internal_node_ptr &node,
                                        const size_type _j, const size_type i) {
     size_type j = _j;
     auto current_node = node;
-    const CharT c = text[_j];
 
     for (;;) {
+      const CharT c = text[j];
       auto &edge = current_node->next_edge(c);
       if (!edge) { // node has no edge with label start with c
-        new_leaf(current_node, j, i);
+        new_leaf(current_node, j, leaf_end_pos);
         return ExtensionType::newleaf;
-      }
-      if (dynamic_cast<LeafEdge *>(edge.get())) { // reaching leaf
-        return ExtensionType::extendleaf;
       }
 
       size_type remain_length = i - j + 1;
       size_type start_pos = edge->start_position();
       size_type edge_length = edge->length();
       if (remain_length <= edge_length) { // travel will end in this edge
-        if (text[start_pos + remain_length - 1] == text[i]) {
+        size_type possible_diverge_point = start_pos + remain_length - 1;
+        if (text[possible_diverge_point] == text[i]) {
           break; // nothing to do, break and will return extendleaf
         } else {
-          auto new_node = break_edge(current_node, c, i);
-          new_leaf(new_node, j, i);
+          auto new_node =
+              break_edge(current_node, c, possible_diverge_point - 1);
+          new_leaf(new_node, i, leaf_end_pos);
           return ExtensionType::newnode;
         }
       }
@@ -272,16 +320,24 @@ public:
       j += edge_length;
       current_node =
           std::dynamic_pointer_cast<InternalNode>(current_node->next_node(c));
-      if (!current_node)
-        throw std::logic_error("Goes to Leaf!");
+      if (!current_node) {
+        if (i - j + 1 != 1)
+          throw("remain error");
+        break;
+      }
     }
     return ExtensionType::extendleaf;
   }
 
   void build() { // S[j,i)
     for (size_type i = 0; i <= textlen; i++) {
+      leaf_end_pos = i;
       for (size_type j = 0; j <= i; j++) {
-          travel_down_and_extend(root, j, i);
+        auto ret = travel_down_and_extend(root, j, i);
+        // cout << " ----------" << i <<" " <<j<<endl;
+        // print();
+        // cout << int(ret);
+        // cout << endl;
       }
     }
   }
@@ -291,12 +347,18 @@ int main(int argc, char *argv[]) {
 
   if (argc != 2) {
     std::cout << "Usage: a.out str" << std::endl;
+    return -1;
   }
 
   std::string s1{argv[1]};
-  SuffixTreeNaive st1{s1};
+  SuffixTreeNaive st2{s1};
+  st2.build();
+
+  SuffixTreeImpl st1{s1};
   st1.build();
   st1.print();
+
+  std::cout << (st2 == st1) << std::endl;
 
   return 0;
 }

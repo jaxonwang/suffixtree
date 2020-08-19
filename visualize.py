@@ -9,6 +9,8 @@ if __name__ == "__main__":
     edges = []
     for line in sys.stdin:
         words = line.strip().split(' ')
+        if len(words)!=3:
+            continue
         node_ids.add(words[0])
         node_ids.add(words[2])
         edges.append(words)

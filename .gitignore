@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+*.dSYM
+*.swp
+suffix_tree_test
