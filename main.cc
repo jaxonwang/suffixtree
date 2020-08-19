@@ -70,7 +70,7 @@ public:
   virtual ~Edge() = default;
   virtual size_type start_position() = 0;
   virtual size_type end_position() = 0;
-  virtual size_type length() { return end_position() - start_position(); }
+  virtual size_type length() { return end_position() - start_position() + 1; }
   virtual std::pair<edge_ptr, edge_ptr>
   break_edge(const size_type pos) const = 0;
 };
@@ -127,12 +127,15 @@ public:
 protected:
   using StringT = std::string;
   const StringT text;
+  const size_type textlen;
   static const CharT term_symbol = '\0';
   internal_node_ptr root;
 
 public:
   SuffixTreeBase() = delete;
-  SuffixTreeBase(const StringT &text) : text(text) {}
+  SuffixTreeBase(const StringT &text)
+      : text(text), textlen(text.size()),
+        root(std::make_shared<InternalNode>()) {}
   internal_node_ptr break_edge(internal_node_ptr &edge_owner, const CharT c,
                                const size_type pos) {
     auto real_node = edge_owner;
@@ -140,13 +143,13 @@ public:
     auto edge_pair = e->break_edge(pos);
     auto first_edge = move(edge_pair.first);
     auto second_edge = move(edge_pair.second);
-    auto new_internal = std::unique_ptr<InternalNode>{new InternalNode{}};
+    auto new_internal = std::make_shared<InternalNode>();
 
     new_internal->children[c] = real_node->children[c];
     new_internal->adj_edges[c] = move(second_edge);
 
     real_node->children[c] = std::static_pointer_cast<Node>(
-        std::shared_ptr<InternalNode>{move(new_internal)});
+        std::shared_ptr<InternalNode>{new_internal});
     real_node->adj_edges[c] = move(first_edge);
     return new_internal;
   }
@@ -189,9 +192,7 @@ class SuffixTreeNaive : public SuffixTreeBase {
 public:
   SuffixTreeNaive(const StringT &s) : SuffixTreeBase(s) {}
   void build() {
-    textlen = text.size();
-    root = std::make_shared<InternalNode>();
-    for (size_t i = 0; i < textlen; i++) {
+    for (size_t i = 0; i <= textlen; i++) {
       int j = i;
       internal_node_ptr current_node = root;
 
@@ -205,7 +206,7 @@ public:
         }
 
         size_t start = nextedge_ptr->start_position();
-        size_t end = nextedge_ptr->start_position();
+        size_t end = nextedge_ptr->end_position();
         for (; start <= end; start++, j++) {
           if (text[start] != text[j]) {
             auto new_node = break_edge(current_node, current_char, start - 1);
@@ -224,9 +225,75 @@ public:
   }
 };
 
-int main() {
+class SuffixTreeImpl : public SuffixTreeBase {
+private:
+  enum class ExtensionType : int {
+    newleaf,
+    newnode,
+    extendleaf, // extend the end point of leaf or just do nothing for implicit
+                // suffix tree
+  };
+  size_type leaf_end_pos;
 
-  std::string s1{"banana"};
+public:
+  SuffixTreeImpl(const StringT &s) : SuffixTreeBase(s), leaf_end_pos(0) {}
+
+  // try travel down to the point S[j, i)(could be empty) is matchd, and append S(i), create
+  // node if necessary
+  ExtensionType travel_down_and_extend(internal_node_ptr &node,
+                                       const size_type _j, const size_type i) {
+    size_type j = _j;
+    auto current_node = node;
+    const CharT c = text[_j];
+
+    for (;;) {
+      auto &edge = current_node->next_edge(c);
+      if (!edge) { // node has no edge with label start with c
+        new_leaf(current_node, j, i);
+        return ExtensionType::newleaf;
+      }
+      if (dynamic_cast<LeafEdge *>(edge.get())) { // reaching leaf
+        return ExtensionType::extendleaf;
+      }
+
+      size_type remain_length = i - j + 1;
+      size_type start_pos = edge->start_position();
+      size_type edge_length = edge->length();
+      if (remain_length <= edge_length) { // travel will end in this edge
+        if (text[start_pos + remain_length - 1] == text[i]) {
+          break; // nothing to do, break and will return extendleaf
+        } else {
+          auto new_node = break_edge(current_node, c, i);
+          new_leaf(new_node, j, i);
+          return ExtensionType::newnode;
+        }
+      }
+      // skip this node and travel to next node
+      j += edge_length;
+      current_node =
+          std::dynamic_pointer_cast<InternalNode>(current_node->next_node(c));
+      if (!current_node)
+        throw std::logic_error("Goes to Leaf!");
+    }
+    return ExtensionType::extendleaf;
+  }
+
+  void build() { // S[j,i)
+    for (size_type i = 0; i <= textlen; i++) {
+      for (size_type j = 0; j <= i; j++) {
+          travel_down_and_extend(root, j, i);
+      }
+    }
+  }
+};
+
+int main(int argc, char *argv[]) {
+
+  if (argc != 2) {
+    std::cout << "Usage: a.out str" << std::endl;
+  }
+
+  std::string s1{argv[1]};
   SuffixTreeNaive st1{s1};
   st1.build();
   st1.print();
