@@ -1,7 +1,12 @@
+#include <array>
+#include <charconv>
+#include <sstream>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <unordered_map>
 using namespace std;
+using namespace std::chrono;
 
 class SuffixTree;
 class Node;
@@ -45,13 +50,17 @@ public:
 
 class InternalNode : public NonLeaf {
   friend class SuffixTree;
+  using internal_node_ptr = std::shared_ptr<InternalNode>;
   using node_ptr = std::shared_ptr<Node>;
-  using suffix_link_t = std::weak_ptr<Node>;
+  using suffix_link_t = std::weak_ptr<InternalNode>;
   suffix_link_t suffix_link;
 
 public:
   InternalNode() = default;
-  void set_suffix_link(const node_ptr &p) { suffix_link = suffix_link_t(p); }
+  void set_suffix_link(const internal_node_ptr &p) {
+    suffix_link = suffix_link_t(p);
+  }
+  suffix_link_t get_suffix_link() { return suffix_link; }
 };
 
 class Leaf : public Node {
@@ -136,7 +145,9 @@ public:
   SuffixTreeBase() = delete;
   SuffixTreeBase(const StringT &text)
       : text(text), textlen(text.size()),
-        root(std::make_shared<InternalNode>()) {}
+        root(std::make_shared<InternalNode>()) {
+    root->set_suffix_link(root);
+  }
   internal_node_ptr break_edge(internal_node_ptr &edge_owner, const CharT c,
                                const size_type pos) {
     // break edge[start, end] into [start, pos] [post+1, end]
@@ -179,6 +190,10 @@ public:
       }
       std::cout << " " << kv.second.get() << std::endl;
     }
+    internal_node_ptr suffix_node = node->get_suffix_link().lock();
+    if (suffix_node) {
+      std::cout << node.get() << " -> " << suffix_node.get() << endl;
+    }
     for (auto &kv : node->children) {
       auto next = std::dynamic_pointer_cast<InternalNode>(kv.second);
       if (next)
@@ -217,12 +232,12 @@ public:
       auto child2 =
           std::dynamic_pointer_cast<InternalNode>(root2->children[c.first]);
       // if child is leaf then the cooresponding child should be leaf
-      if ((!child1 && child2) || (child1 && !child2)){
+      if ((!child1 && child2) || (child1 && !child2)) {
         std::cout << "different child type" << std::endl;
         return false;
       }
-      if(!child1)
-          continue;
+      if (!child1)
+        continue;
       if (!_same_tree(child1, child2))
         return false;
     }
@@ -290,16 +305,23 @@ public:
   // try travel down to the point S[j, i)(could be empty) is matchd, and append
   // S(i), create node if necessary
   ExtensionType travel_down_and_extend(internal_node_ptr &node,
-                                       const size_type _j, const size_type i) {
+                                       const size_type _j, const size_type i,
+                                       internal_node_ptr &stop_node,
+                                       internal_node_ptr &suffix_link_node,
+                                       size_type &travel_depth) {
     size_type j = _j;
     auto current_node = node;
+    ExtensionType ret = ExtensionType::extendleaf;
+    suffix_link_node = nullptr;
+    travel_depth = 0;
 
     for (;;) {
       const CharT c = text[j];
       auto &edge = current_node->next_edge(c);
       if (!edge) { // node has no edge with label start with c
         new_leaf(current_node, j, leaf_end_pos);
-        return ExtensionType::newleaf;
+        ret = ExtensionType::newleaf;
+        break;
       }
 
       size_type remain_length = i - j + 1;
@@ -313,35 +335,85 @@ public:
           auto new_node =
               break_edge(current_node, c, possible_diverge_point - 1);
           new_leaf(new_node, i, leaf_end_pos);
-          return ExtensionType::newnode;
+          ret = ExtensionType::newnode;
+          suffix_link_node = new_node;
+          break;
         }
       }
       // skip this node and travel to next node
       j += edge_length;
-      current_node =
+      travel_depth += edge_length;
+      auto maybe_internal =
           std::dynamic_pointer_cast<InternalNode>(current_node->next_node(c));
-      if (!current_node) {
+      if (!maybe_internal) { // extend on leaf edge
         if (i - j + 1 != 1)
           throw("remain error");
         break;
+      } else {
+        current_node = maybe_internal; // go to next node
       }
     }
-    return ExtensionType::extendleaf;
+    stop_node = current_node;
+    if (!suffix_link_node)
+      suffix_link_node = stop_node;
+    return ret;
   }
 
   void build() { // S[j,i)
+    internal_node_ptr longest_node = root;
+    internal_node_ptr node_to_start = longest_node;
+
+    size_type j_start_with = 0;
+    size_type start_depth = 0;
+
     for (size_type i = 0; i <= textlen; i++) {
       leaf_end_pos = i;
-      for (size_type j = 0; j <= i; j++) {
-        auto ret = travel_down_and_extend(root, j, i);
-        // cout << " ----------" << i <<" " <<j<<endl;
-        // print();
-        // cout << int(ret);
-        // cout << endl;
+      internal_node_ptr node_to_update_suffix_link = nullptr;
+
+      // find the depth of the longest_node
+
+      for (size_type j = j_start_with; j <= i; j++) {
+
+        internal_node_ptr stop_node;
+        internal_node_ptr suffix_link_node;
+        size_type travel_depth;
+        auto ret =
+            travel_down_and_extend(node_to_start, j + start_depth, i, stop_node,
+                                   suffix_link_node, travel_depth);
+
+        if (node_to_update_suffix_link) {
+          // set suffix link
+          node_to_update_suffix_link->set_suffix_link(suffix_link_node);
+        }
+
+        if (ret == ExtensionType::newnode) { // need to specify suffix link must
+                                             // be updated
+          node_to_update_suffix_link = suffix_link_node;
+        } else {
+          node_to_update_suffix_link = nullptr;
+        }
+
+        if (ret != ExtensionType::extendleaf) { // new leaf is created
+          j_start_with = j + 1;
+          node_to_start = stop_node->get_suffix_link().lock(); // next to start
+          start_depth += (stop_node.get() == root.get()) ? 0 : travel_depth - 1;
+          cout << start_depth << endl;
+        } else { // no need for the future extend , since they must be extesion
+                 // type 3
+          break;
+        }
       }
     }
   }
 };
+
+string rand_str(size_t length){
+   stringstream ss; 
+   for (size_t i = 0; i < length; i++) {
+    ss << static_cast<char>('a' + rand() % 26);
+   }
+   return ss.str();
+}
 
 int main(int argc, char *argv[]) {
 
@@ -350,13 +422,22 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  std::string s1{argv[1]};
+  std::string s1 = rand_str(stoi(argv[1]));
+
+  auto t_start = steady_clock::now();
   SuffixTreeNaive st2{s1};
   st2.build();
 
+  auto t_end = steady_clock::now();
+  auto dur = duration<double>(t_end - t_start).count();
+  cout << "Test: naive Execution time: " << dur << endl;
+
+  t_start = steady_clock::now();
   SuffixTreeImpl st1{s1};
   st1.build();
-  st1.print();
+  t_end = steady_clock::now();
+  dur = duration<double>(t_end - t_start).count();
+  cout << "Test: impl Execution time: " << dur << endl;
 
   std::cout << (st2 == st1) << std::endl;
 
