@@ -1,10 +1,11 @@
 #include <array>
 #include <charconv>
-#include <sstream>
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <unordered_map>
+#include <vector>
 using namespace std;
 using namespace std::chrono;
 
@@ -22,7 +23,7 @@ using CharT = char;
 class Node {
 public:
   using edge_ptr = std::unique_ptr<Edge>;
-  using node_ptr = std::shared_ptr<Node>;
+  using node_ptr = Node *;
   Node() = default;
   virtual ~Node() = default;
   // virtual node_ptr next_node(const CharT c) = 0;
@@ -32,7 +33,7 @@ public:
 class NonLeaf : public Node {
 public:
   using edge_ptr = std::unique_ptr<Edge>;
-  using node_ptr = std::shared_ptr<Node>;
+  using node_ptr = Node *;
   std::unordered_map<CharT, node_ptr> children;
   std::unordered_map<CharT, edge_ptr> adj_edges;
   node_ptr next_node(const CharT c) {
@@ -50,16 +51,14 @@ public:
 
 class InternalNode : public NonLeaf {
   friend class SuffixTree;
-  using internal_node_ptr = std::shared_ptr<InternalNode>;
-  using node_ptr = std::shared_ptr<Node>;
-  using suffix_link_t = std::weak_ptr<InternalNode>;
+  using internal_node_ptr = InternalNode *;
+  using node_ptr = Node *;
+  using suffix_link_t = InternalNode *;
   suffix_link_t suffix_link;
 
 public:
   InternalNode() = default;
-  void set_suffix_link(const internal_node_ptr &p) {
-    suffix_link = suffix_link_t(p);
-  }
+  void set_suffix_link(const internal_node_ptr &p) { suffix_link = p; }
   suffix_link_t get_suffix_link() { return suffix_link; }
 };
 
@@ -130,8 +129,8 @@ public:
 class SuffixTreeBase {
 public:
   using edge_ptr = std::unique_ptr<Edge>;
-  using node_ptr = std::shared_ptr<Node>;
-  using internal_node_ptr = std::shared_ptr<InternalNode>;
+  using node_ptr = Node *;
+  using internal_node_ptr = InternalNode *;
   using size_type = size_t;
 
 protected:
@@ -140,12 +139,14 @@ protected:
   const size_type textlen;
   static const CharT term_symbol = '\0';
   internal_node_ptr root;
+  vector<unique_ptr<Node>> node_holder;
 
 public:
   SuffixTreeBase() = delete;
-  SuffixTreeBase(const StringT &text)
-      : text(text), textlen(text.size()),
-        root(std::make_shared<InternalNode>()) {
+  SuffixTreeBase(const StringT &text) : text(text), textlen(text.size()) {
+    std::unique_ptr<InternalNode> root_ptr{new InternalNode};
+    root = root_ptr.get();
+    node_holder.push_back(move(root_ptr));
     root->set_suffix_link(root);
   }
   internal_node_ptr break_edge(internal_node_ptr &edge_owner, const CharT c,
@@ -156,14 +157,15 @@ public:
     auto edge_pair = e->break_edge(pos);
     auto first_edge = move(edge_pair.first);
     auto second_edge = move(edge_pair.second);
-    auto new_internal = std::make_shared<InternalNode>();
+    std::unique_ptr<InternalNode> new_internal_ptr{new InternalNode()};
+    internal_node_ptr new_internal = new_internal_ptr.get();
+    node_holder.push_back(move(new_internal_ptr));
 
     const CharT breakpoint_c = text[pos + 1];
     new_internal->children[breakpoint_c] = real_node->children[c];
     new_internal->adj_edges[breakpoint_c] = move(second_edge);
 
-    real_node->children[c] = std::static_pointer_cast<Node>(
-        std::shared_ptr<InternalNode>{new_internal});
+    real_node->children[c] = new_internal;
     real_node->adj_edges[c] = move(first_edge);
     return new_internal;
   }
@@ -172,14 +174,16 @@ public:
     const CharT c = text[start_pos];
     current_node->adj_edges[c] =
         std::unique_ptr<Edge>{new LeafEdge{start_pos, end_pos}};
-    current_node->children[c] =
-        std::static_pointer_cast<Node>(std::make_shared<Leaf>());
+
+    std::unique_ptr<Leaf> newleaf_ptr{new Leaf{}};
+    current_node->children[c] = newleaf_ptr.get();
+    node_holder.push_back(move(newleaf_ptr));
   }
 
   void _print(const internal_node_ptr &node) const {
     for (auto &kv : node->children) {
       CharT c = kv.first;
-      std::cout << node.get() << " ";
+      std::cout << node << " ";
       auto &edge = node->adj_edges[c];
       size_type end_pos = edge->end_position();
       for (size_type i = edge->start_position(); i <= end_pos; i++) {
@@ -188,14 +192,14 @@ public:
         else
           std::cout << text[i];
       }
-      std::cout << " " << kv.second.get() << std::endl;
+      std::cout << " " << kv.second << std::endl;
     }
-    internal_node_ptr suffix_node = node->get_suffix_link().lock();
+    internal_node_ptr suffix_node = node->get_suffix_link();
     if (suffix_node) {
-      std::cout << node.get() << " -> " << suffix_node.get() << endl;
+      std::cout << node << " -> " << suffix_node << endl;
     }
     for (auto &kv : node->children) {
-      auto next = std::dynamic_pointer_cast<InternalNode>(kv.second);
+      auto next = dynamic_cast<internal_node_ptr>(kv.second);
       if (next)
         _print(next);
     }
@@ -228,9 +232,8 @@ public:
         std::cout << "children size different" << std::endl;
         return false;
       }
-      auto child1 = std::dynamic_pointer_cast<InternalNode>(c.second);
-      auto child2 =
-          std::dynamic_pointer_cast<InternalNode>(root2->children[c.first]);
+      auto child1 = dynamic_cast<internal_node_ptr>(c.second);
+      auto child2 = dynamic_cast<internal_node_ptr>(root2->children[c.first]);
       // if child is leaf then the cooresponding child should be leaf
       if ((!child1 && child2) || (child1 && !child2)) {
         std::cout << "different child type" << std::endl;
@@ -278,7 +281,7 @@ public:
             goto end_insert_i;
           }
         }
-        current_node = std::dynamic_pointer_cast<InternalNode>(
+        current_node = dynamic_cast<internal_node_ptr>(
             current_node->next_node(current_char));
         if (!current_node)
           throw std::logic_error("Goes to Leaf!");
@@ -344,7 +347,7 @@ public:
       j += edge_length;
       travel_depth += edge_length;
       auto maybe_internal =
-          std::dynamic_pointer_cast<InternalNode>(current_node->next_node(c));
+          dynamic_cast<internal_node_ptr>(current_node->next_node(c));
       if (!maybe_internal) { // extend on leaf edge
         if (i - j + 1 != 1)
           throw("remain error");
@@ -395,9 +398,8 @@ public:
 
         if (ret != ExtensionType::extendleaf) { // new leaf is created
           j_start_with = j + 1;
-          node_to_start = stop_node->get_suffix_link().lock(); // next to start
-          start_depth += (stop_node.get() == root.get()) ? 0 : travel_depth - 1;
-          cout << start_depth << endl;
+          node_to_start = stop_node->get_suffix_link(); // next to start
+          start_depth += (stop_node == root) ? 0 : travel_depth - 1;
         } else { // no need for the future extend , since they must be extesion
                  // type 3
           break;
@@ -407,12 +409,12 @@ public:
   }
 };
 
-string rand_str(size_t length){
-   stringstream ss; 
-   for (size_t i = 0; i < length; i++) {
+string rand_str(size_t length) {
+  stringstream ss;
+  for (size_t i = 0; i < length; i++) {
     ss << static_cast<char>('a' + rand() % 26);
-   }
-   return ss.str();
+  }
+  return ss.str();
 }
 
 int main(int argc, char *argv[]) {
